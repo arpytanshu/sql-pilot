@@ -1,13 +1,22 @@
 import torch
 
-def collater(batch, pad_id=-1):
-    lengths = [len(x) for x in batch['input_ids']]
-    max_length = max(lengths)
-    for i in range(len(batch['input_ids'])):
-        batch['input_ids'][i] += [pad_id] * (max_length - lengths[i])
-        batch['labels'][i] += [pad_id] * (max_length - lengths[i])
+import numpy as np
 
-    input_ids = torch.tensor(batch['input_ids'])
-    labels = torch.tensor(batch['labels'])
+class Collater:
+    def __init__(self, pad_id):
+        self.pad_id = pad_id
+    def __call__(self, batch):
+        lengths = [len(x['input_ids']) for x in batch]
+        max_length = max(lengths)
+        
+        input_ids = []
+        labels = []
+        for ix, sample in enumerate(batch):
+            input_ids.append([self.pad_id] * (max_length - lengths[ix]) + sample['input_ids'])
+            labels.append([self.pad_id] * (max_length - lengths[ix]) + sample['labels'])
+        input_ids = torch.tensor(input_ids)
+        labels = torch.tensor(labels)
+        return dict(input_ids=input_ids, labels=labels)
 
-    return dict(input_ids=input_ids, labels=labels)
+
+

@@ -1,8 +1,10 @@
 
+
+#%%
+
 import os
 import sys
 import logging
-import numpy as np
 from pathlib import Path    
 from typing import Union
 from time import perf_counter
@@ -14,24 +16,29 @@ import fire
 import torch
 from torch.optim import AdamW
 
-import matplotlib.pyplot as plt
+import numpy as np
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from transformers import LlamaConfig, LlamaForCausalLM
+from datasets import load_from_disk
 
-from model.VAE import VAEConfig, VAEModel, VAELoss
-from data.celeb_utils import get_dataset
+from utils import Collater
+from tokenizer import Tokenizer
+
+
 
 
 @dataclass
 class TrainingArgs:
-    dataset_path: Path = None
+    dataset_path: Path = Path('data/preprocessed_dataset')
+    tokenizer_path: Path = Path('data/tok3072.model')
     device: torch.device = torch.device('cuda:0')
     dtype: torch.dtype = torch.float32
     chkpt_base_dir: Path = Path('runs/')
     
-    train_batch_sz: int = 384
-    test_batch_sz: int = 640
+    train_batch_sz: int = 128
+    test_batch_sz: int = 512
 
     beta1: float = 0.9
     beta2: float = 0.95
@@ -39,19 +46,15 @@ class TrainingArgs:
     min_lr: float = 1e-6
     kld_weight: float = 0.0001
     
-    max_iters: int = 5001
-
-    model_cfg: VAEConfig = VAEConfig()
+    max_iters: int = 10001
 
     curr_iter: int = 1
     log_interval: int = 25
     eval_iterval: int = 150
-    plot_interval: int = 50
+    generate_interval: int = 200
     best_model_stat: float = None
     worse_report_counter: int = 0
 
-    save_plots: bool = True
-    n_samples_visualize: int = 3072
 
 
 class Trainer:
@@ -89,7 +92,8 @@ class Trainer:
             self.logger.info('checkpoint_path not provided. starting new run.')
             self.logger.info('dumping args...')
             self.logger.info(str(self.args.__dict__))
-
+            
+            self.tokenizer = self.get_tokenizer()
             self.model = self.init_model()
             self.optimizer = self.get_optimizer()
             self.scheduler = self.get_scheduler()
@@ -98,39 +102,35 @@ class Trainer:
 
         self.tr_dataloader = self.get_train_dataloader()
         self.te_dataloader = self.get_test_dataloader()
-        self.criterion = self.get_loss_fn()
         self.logger.info("All initializations complete.")
 
         self.writer = SummaryWriter(self.checkpoint_path)
+
+    def get_tokenizer(self):
+        return Tokenizer(tokenizer_model=str(self.args.tokenizer_path))
 
     def train(self):
         self.logger.info(f"Resuming training from iter={self.args.curr_iter}")
         for itern in range(self.args.curr_iter, self.args.max_iters):
             self.args.curr_iter = itern
             
-            images, _ = next(iter(self.tr_dataloader))
+            batch = next(iter(self.tr_dataloader))
             
             self.model.train()
             self.optimizer.zero_grad()
             
-            images = images.to(self.args.dtype).to(self.args.device)
-            # labels = labels.to(self.args.dtype).to(self.args.device)
+            input_ids = batch['input_ids'].to(torch.long).to(self.args.device)
+            labels = batch['labels'].to(torch.long).to(self.args.device)
 
-            reconst, _, mu, log_var = self.model(images)
+            out = self.model(input_ids=input_ids, labels=labels)
 
-            losses = self.compute_loss(input = images, 
-                                       reconst = reconst, 
-                                       mu = mu, 
-                                       log_var=log_var)
-
-            losses['loss'].backward()
+            out.loss.backward()
             self.optimizer.step()
             self.scheduler.step()
 
+            scaler_loss = out.loss.detach().item()
             tr_rpt = dict(
-                train_loss = round(losses['loss'].detach().item(), 4),
-                train_recon_loss = round(losses['recon_loss'].item(), 4),
-                train_kld = round(losses['kld'].item(), 4),
+                train_loss = round(scaler_loss, 4),
                 learning_rate=round(self.optimizer.param_groups[0]['lr'], 6))
 
             self.write_tensorboard(tr_rpt)
@@ -138,23 +138,25 @@ class Trainer:
             # log training stuff
             if (itern % self.args.log_interval) == 0:
                 self.logger.info(f"{itern=} tr_loss:{tr_rpt['train_loss']} ")
-                self.logger.info(f"tr_recon_loss:{tr_rpt['train_recon_loss']} tr_kld:{tr_rpt['train_kld']}")
             
-            # log evaluation stuff + checkpoint
-            if (itern % self.args.eval_iterval) == 0:
-                self.logger.info(f"Running evaluation at {itern=}...")
-                te_rpt = self.evaluate()
-                self.write_tensorboard(te_rpt)
-                self.logger.info(f"{itern=} te_loss:{te_rpt['test_loss']} elapsed:{te_rpt['elapsed']}")
-                self.logger.info(f"te_recon_loss:{te_rpt['test_recon_loss']} te_kld:{te_rpt['test_kld']}")
-                self.checkpoint_logic(te_rpt, tr_rpt)
+            # # log evaluation stuff + checkpoint
+            # if (itern % self.args.eval_iterval) == 0:
+            #     self.logger.info(f"Running evaluation at {itern=}...")
+            #     te_rpt = self.evaluate()
+            #     self.write_tensorboard(te_rpt)
+            #     self.logger.info(f"{itern=} te_loss:{te_rpt['test_loss']} elapsed:{te_rpt['elapsed']}")
+            #     self.logger.info(f"te_recon_loss:{te_rpt['test_recon_loss']} te_kld:{te_rpt['test_kld']}")
+            #     self.checkpoint_logic(te_rpt, tr_rpt)
 
             # plot stuff
-            elif (self.args.save_plots) and ((itern % self.args.plot_interval) == 0):
-                self.model.get_latent_space_plot(self.te_dataloader, 
-                                                    self.args.n_samples_visualize, 
-                                                    self.args, 
-                                                    save_plot=True)
+            if (itern % self.args.generate_interval) == 0:
+                ix = np.random.randint(0, len(self.te_dataloader.dataset))
+                sample = self.te_dataloader.dataset[ix]
+                res = self.generate(sample)
+                self.logger.info(f"{res['ground_truth']=}")
+                self.logger.info(f"{res['generation']=}")
+
+            torch.cuda.empty_cache()
 
 
     def checkpoint_logic(self, test_report, train_report):
@@ -201,7 +203,8 @@ class Trainer:
     def load_checkpoint(self, ):
         chkpt = torch.load(self.checkpoint_path / self.chkpt_file_name)
         self.args = chkpt['args']
-        self.model = VAEModel(self.args.model_cfg)
+        self.tokenizer = self.get_tokenizer()
+        self.model = self.init_model()
         self.model.load_state_dict(chkpt['model'])
         self.model.to(self.args.dtype).to(self.args.device)
 
@@ -262,28 +265,58 @@ class Trainer:
     def _override_args(self, override_args: dict):
         # inplace update self.args with entries in override_args/
         self.args.__dict__.update(override_args)
-      
+    
+    def get_dataset(self):
+        dataset  = load_from_disk(self.args.dataset_path)
+        rng = np.random.default_rng(seed=2310)
+        test_indices = rng.integers(0, len(dataset), int(0.1 * len(dataset)))
+        train_indices = np.setdiff1d(np.arange(len(dataset)), test_indices)    
+        test_dataset = dataset.select(test_indices)
+        train_dataset = dataset.select(train_indices)
+        return dict(
+            test_dataset=test_dataset, 
+            train_dataset=train_dataset)
+    
     def get_train_dataloader(self):
-        tr_dataset = get_dataset(self.args.dataset_path, split='train')
+        dataset  = load_from_disk(self.args.dataset_path)
+        rng = np.random.default_rng(seed=2310)
+        test_indices = rng.integers(0, len(dataset), int(0.1 * len(dataset)))
+        train_indices = np.setdiff1d(np.arange(len(dataset)), test_indices)    
+        tr_dataset = dataset.select(train_indices)
         tr_dataloader = DataLoader(tr_dataset, 
                                    batch_size=self.args.train_batch_sz, 
-                                   shuffle=True)
+                                   shuffle=True,
+                                   collate_fn=Collater(self.tokenizer.bos_id))
         return tr_dataloader
 
     def get_test_dataloader(self):
-        te_dataset = get_dataset(self.args.dataset_path, split='test')
+        dataset  = load_from_disk(self.args.dataset_path)
+        rng = np.random.default_rng(seed=2310)
+        test_indices = rng.integers(0, len(dataset), int(0.1 * len(dataset)))
+        te_dataset = dataset.select(test_indices)
         te_dataloader = DataLoader(te_dataset,
                                    batch_size=self.args.test_batch_sz, 
-                                   shuffle=False)
+                                   shuffle=False,
+                                   collate_fn=Collater(self.tokenizer.bos_id))
         return te_dataloader
 
-    def get_loss_fn(self):
-        return VAELoss
 
-    def init_model(self):
-        return VAEModel(self.args.model_cfg).\
-            to(self.args.dtype).\
-            to(self.args.device)
+
+    def init_model(self, ):
+        config = LlamaConfig()
+        config.vocab_size = self.tokenizer.n_words
+        config.hidden_size = 512
+        config.intermediate_size = 512
+        config.num_hidden_layers = 6
+        config.num_attention_heads = 4
+        config.max_position_embeddings = 512
+        config.num_key_value_heads = 4
+        config.pad_token_id = self.tokenizer.bos_id
+        config.bos_token_id = self.tokenizer.bos_id
+        config.eos_token_id = self.tokenizer.eos_id
+        model = LlamaForCausalLM._from_config(config)
+        model = model.to(self.args.dtype).to(self.args.device)
+        return model
 
     def compute_loss(self, input, reconst, mu, log_var):
         return self.criterion(input=input, 
@@ -328,20 +361,56 @@ class Trainer:
         for key in report.keys():
             self.writer.add_scalar(key, report[key], self.args.curr_iter)
     
+    def generate(self, sample, do_sample = False, temperature=1.0, max_length=100):
+        get_ctx = lambda x: f"context : {x['context']} \nquestion : {x['question']}"
+        get_ans = lambda x: f"answer : {x['answer']}"
 
+        ctx = get_ctx(sample)
+        ctx_ids = self.tokenizer.encode(ctx, bos=True, eos=False)
+        input_ids = torch.tensor(ctx_ids).unsqueeze(0).to(self.model.device)
 
+        input_len = len(input_ids[0])
+        for ix in range(max_length):
+            with torch.no_grad():
+                output = self.model(input_ids.to(self.model.device), 
+                                output_hidden_states=True, 
+                                use_cache=False)
+
+                logits = output.logits[:, -1, :] # BxT
             
-def main(    
-        dataset_path,
+            logits = logits / temperature
+            probs = torch.softmax(logits, axis=1) # BxT
+            
+            if do_sample:
+                out_token_id = torch.multinomial(probs, 1) # Bx1
+            else:
+                out_token_id = torch.argmax(probs, axis=1).unsqueeze(1)
+
+            input_ids = torch.cat([input_ids, out_token_id], dim=-1)
+
+        generation_ids = input_ids[:, input_len:]
+        generation = self.tokenizer.decode(generation_ids.view(-1).tolist())
+
+        res = {}
+        if sample.get('answer'):
+            ans = get_ans(sample)
+            res['ground_truth'] = ans
+        res['generation'] = generation  
+
+        return res
+    
+            
+def main(
+        dataset_path = Path('data/preprocessed_dataset'),
         checkpoint_path = None,
         train = True,
         eval = True,
         device = 'cuda',
         dtype = 'fp32', # fp32, bf16,
         chkpt_base_dir = 'runs/',
-        train_batch_sz = 384,
-        test_batch_sz = 2048,
-        max_iters = 10001,
+        train_batch_sz = 128,
+        test_batch_sz = 256,
+        max_iters = 10000,
         log_interval = 25,
         eval_iterval = 150,
         plot_interval = 50
@@ -389,6 +458,12 @@ def main(
     if eval:
         trainer.evaluate()
 
+args = TrainingArgs()
+trainer = Trainer(args)
+trainer.train()
+# trainer = Trainer(checkpoint_path="runs/231115-0803")
+# self = trainer
 
-if __name__ == '__main__':
-    fire.Fire(main)
+# if __name__ == '__main__':
+#     fire.Fire(main)
+# %%
