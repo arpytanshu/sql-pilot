@@ -1,6 +1,5 @@
 # SQL-PILOT
 A small llama finetuned to create your SQL queries.
-fast serving on cpu karpathy/llama.c
 
 ![sql-gen](assets/output.gif)
 
