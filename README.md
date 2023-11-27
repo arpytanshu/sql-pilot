@@ -2,7 +2,7 @@
 A small llama finetuned to create your SQL queries.
 fast serving on cpu karpathy/llama.c
 
-WIP.
+![sql-gen](assets/output.gif)
 
 
 ### Dataset
@@ -50,4 +50,7 @@ b-mc2/sql-create-context:
 - This will save a preprocessed dataset in the cache directory.  
     ```python scripts/prepare_dataset.py --tokenizer_path=<your fav dir> --data_cache_dir=<your fav dir>```
 
+
+### Finetune
+use finetune.py
 
