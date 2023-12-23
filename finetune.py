@@ -25,7 +25,8 @@ from transformers import TrainerCallback
 
 
 # model_id = "meta-llama/Llama-2-7b-chat-hf"
-model_id = "openlm-research/open_llama_3b_v2"
+# model_id = "openlm-research/open_llama_3b_v2"
+model_id = "TinyLlama/TinyLlama-1.1B-Chat-v0.6"
 dataset_name = "data/preprocessed_dataset"
 
 bnb_config = BitsAndBytesConfig(
@@ -54,11 +55,11 @@ model = prepare_model_for_kbit_training(model)
 model = get_peft_model(model, lora_config)
 
 
-
 tokenizer = AutoTokenizer.from_pretrained(model_id)
-tokenizer.pad_token = tokenizer.eos_token
+tokenizer.pad_token = tokenizer.unk_token
+tokenizer.pad_token_id = tokenizer.unk_token_id
 
-datasets = get_datasets(tokenizer, dataset_name)
+datasets = get_datasets(tokenizer, dataset_name, masked_labels=True)
 train_dataset = datasets['train_dataset']
 test_dataset = datasets['test_dataset']
 
@@ -85,6 +86,7 @@ class MyCallback(TrainerCallback):
         exact_match = custom_evaluate(model, tokenizer, self.eval_dataset, num_samples=num_samples)
         print(f"{exact_match} exact match out of {num_samples} samples.")
 
+
 training_args = transformers.TrainingArguments(
     # auto_find_batch_size=True,
     per_device_train_batch_size=24,
@@ -95,7 +97,7 @@ training_args = transformers.TrainingArguments(
     save_total_limit=1,
     logging_steps=25,
     eval_steps=100,
-    output_dir='checkpoints-3b/',
+    output_dir='checkpoints/tiny_llama-masked_labels/',
     save_strategy='steps',
     save_steps=50,
     resume_from_checkpoint=True,
@@ -107,7 +109,7 @@ trainer = transformers.Trainer(
     train_dataset=train_dataset,
     eval_dataset=test_dataset,
     args=training_args,
-    data_collator=Collater(pad_id=tokenizer.bos_token_id),
+    data_collator=Collater(pad_id=tokenizer.pad_token_id),
     callbacks=[MyCallback(test_dataset)]
 )
 

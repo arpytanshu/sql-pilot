@@ -12,9 +12,9 @@ def format(sample):
     else:
         return ctx, None
 
-def get_datasets(tokenizer, dataset_path):
+def get_datasets(tokenizer, dataset_path, masked_labels=True):
     
-    def _preprocess(sample):
+    def _masked_labels_preprocess(sample):
         ctx, ans = format(sample)
         ctx_ids = [tokenizer.bos_token_id] + tokenizer.encode(ctx, add_special_tokens=False)
         ans_ids = tokenizer.encode(ans, add_special_tokens=False) + [tokenizer.eos_token_id]
@@ -22,8 +22,18 @@ def get_datasets(tokenizer, dataset_path):
         labels = [-100] * (len(ctx_ids)) + ans_ids
         return {'input_ids': inputs, 'labels': labels}
 
+    def _unmasked_labels_preprocess(sample):
+        ctx, ans = format(sample)
+        ctx_ids = [tokenizer.bos_token_id] + tokenizer.encode(ctx, add_special_tokens=False)
+        ans_ids = tokenizer.encode(ans, add_special_tokens=False) + [tokenizer.eos_token_id]
+        inputs = ctx_ids + ans_ids
+        labels = ctx_ids + ans_ids
+        return {'input_ids': inputs, 'labels': labels}
+
+    preprocess_fn = _masked_labels_preprocess if masked_labels else _unmasked_labels_preprocess
+
     dataset = load_from_disk(dataset_path)
-    dataset = dataset.map(_preprocess)
+    dataset = dataset.map(preprocess_fn)
 
     rng = np.random.default_rng(seed=2310)
     test_indices = rng.integers(0, len(dataset), int(0.05 * len(dataset)))
