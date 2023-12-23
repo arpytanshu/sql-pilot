@@ -163,3 +163,4 @@ data/
 ref_code/
 runs/
 wandb/
+checkpoints/

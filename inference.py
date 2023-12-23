@@ -1,14 +1,14 @@
 
 import sys
-sys.path.append('/shared/CO/huggingface_/transformers/src')
+import warnings
+
+import fire
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import warnings
+from utils import format
+
 warnings.filterwarnings("ignore")
 
-tokenizer = AutoTokenizer.from_pretrained("checkpoints-3b/checkpoint-200")
-model = AutoModelForCausalLM.from_pretrained("checkpoints-3b/checkpoint-200")
-model.to('cuda')
 
 def generate_streaming(model, tokenizer, sample, do_sample = False, temperature=1.0, max_length=100):
     ctx, ans = format(sample)
@@ -38,15 +38,41 @@ def generate_streaming(model, tokenizer, sample, do_sample = False, temperature=
         input_ids_npy = input_ids.ravel()[input_len:].cpu().numpy()
         string = tokenizer.decode(input_ids_npy, skip_special_tokens=True)
         sys.stdout.write("\rSQL: {} ".format(string))
+
+
+def main(checkpoint_path='checkpoints/checkpoints-3b/checkpoint-200'):
+    
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
+    model = AutoModelForCausalLM.from_pretrained(checkpoint_path)
+    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    model.to(device)
+
+    # Start the conversation
+    print("Type 'exit' to quit script.")
+    print("Type 'new' to provide new context.")
+    print("-----------------------------------")
+
+    while True:
+        print('\n\n\nEnter context:', end=' ')
+        context = input()
+
+        if context.lower().strip() == 'exit':
+            sys.exit(0)
         
+        while True:
+            question = input('\nEnter question:')
+            if question.lower().strip() == 'exit':
+                sys.exit(0)
+            if question.lower().strip() == 'new':
+                break
+            sample = dict(context=context, question=question)
+            generate_streaming(model, tokenizer, sample)
+            print()
+        
+        
+if __name__ == '__main__':
+    fire.Fire(main)
 
-
-print('Enter context:', end=' ')
-context = input()
-print()
-print('Enter question:', end=' ')
-question = input()
-print()
-sample = dict(context=context, question=question)
-generate_streaming(model, tokenizer, sample)
-print()
+# CREATE TABLE table_name(name VARCHAR, age INTEGER, gender VARCHAR, preference VARCHAR)
+# get me first names of all people born after 2000 who prefer read_meat.
+ 
